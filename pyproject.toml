@@ -1,0 +1,24 @@
+[tool.poetry]
+name = "aghub"
+version = "0.1.0"
+description = "API and backend for GRID (GReenhouse Intelligent Diagnostic)"
+authors = ["Wren Zhang <wren.zh@gmail.com>"]
+license = "MIT"
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+fastapi = "^0.101.0"
+pyserial = "^3.5"
+websocket = "^0.2.1"
+uvicorn = {extras = ["standard"], version = "^0.23.2"}
+
+
+[tool.poetry.group.dev.dependencies]
+black = "^23.7.0"
+httpx = "^0.24.1"
+pytest = "^7.4.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
