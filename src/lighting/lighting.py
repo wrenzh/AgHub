@@ -396,7 +396,7 @@ def dim_group(
     send(cco_uid, cmd, "", data)
 
 
-@router.post("/disable_group_dimming/{cco_uid}")
+@router.post("/{cco_uid}/disable_group_dimming")
 def disable_group_dimming(
     cco_uid: CCOUID, group: Annotated[int, Query(title="Group ID", min=1, max=8)]
 ):
@@ -411,6 +411,17 @@ def disable_group_dimming(
         + 0x07.to_bytes(1, byteorder="big")
     )
     send(cco_uid, cmd, "", data)
+
+
+@router.post("/{cco_uid}/stop_network_waiting")
+def stop_network_waiting(
+    cco_uid: CCOUID,
+):
+    """
+    Stop waiting for the transmitter and adapter network reestablish
+    """
+    cmd = "WAITSTOP"
+    send(cco_uid, cmd)
 
 
 @router.get("/{cco_uid}/tx_power")
