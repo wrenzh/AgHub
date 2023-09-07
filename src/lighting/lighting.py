@@ -1,7 +1,7 @@
 import asyncio
 import time
 import logging
-from typing import Annotated
+from typing import Annotated, Callable
 from serial import Serial
 from fastapi import (
     HTTPException,
@@ -9,9 +9,12 @@ from fastapi import (
     Query,
     Body,
     APIRouter,
+    Request,
+    Response,
     WebSocket,
     WebSocketDisconnect,
 )
+from fastapi.routing import APIRoute
 from ipaddress import IPv4Address
 from .find_port import portname
 from .lighting_exception import LightingException
@@ -28,7 +31,30 @@ from .data_models import (
 )
 
 
+class BlockingRoute(APIRoute):
+    """
+    Make lighting router blocking because we are sharing one serial interface
+    """
+
+    def __init__(self, *args, **kargs):
+        super().__init__(*args, **kargs)
+        self.lock = asyncio.Lock()
+
+    def get_route_handler(self) -> Callable:
+        original_route_handler = super().get_route_handler()
+
+        async def custom_route_handler(request: Request) -> Response:
+            await self.lock.acquire()
+            response: Response = await original_route_handler(request)
+            self.lock.release()
+            return response
+
+        return custom_route_handler
+
+
 router = APIRouter(prefix="/api/lighting", tags=["lighting"])
+router.route_class = BlockingRoute
+
 logger = logging.getLogger(__name__)
 
 # Initialize the serial port
@@ -44,7 +70,7 @@ def send(
     cmd: str,
     data: str = "",
     data_raw: bytes = b"",
-    wait_duration: float = 0.8,
+    wait_duration: float = 1.0,
 ) -> None:
     """Helper function for sending message through LoRa"""
     msg = __encode__(addr, cmd, data, data_raw)
@@ -57,6 +83,7 @@ def send(
 def receive() -> bytes:
     """Helper function for getting response through LoRa"""
     res = lora.read_until(b"\r\n")
+    logger.debug("Read " + str(res))
 
     busy = [
         e.encode("ascii") for e in ["WHUSEING", "WHBUSY", "TOPOBUSY", "STAGROUPBUSY"]
@@ -82,7 +109,7 @@ def decode(res: bytes | bytearray, cmd: str):
 
 
 @router.get("/list_cco")
-def list_cco():
+async def list_cco():
     """
     List the transmitter serial numbers connected in the LoRa network
     """
@@ -97,7 +124,7 @@ def list_cco():
 
 
 @router.get("/{cco_uid}/control_mode")
-def get_control_mode(cco_uid: CCOUID):
+async def get_control_mode(cco_uid: CCOUID):
     """
     Get the transmitter control mode, 1 means on and 0 means off.
     The sequence is in 0-10V, Button, Modbus/RTU, BACnet/IP and RS232 Debug.
@@ -120,7 +147,7 @@ def get_control_mode(cco_uid: CCOUID):
 
 
 @router.put("/{cco_uid}/control_mode")
-def set_control_mode(
+async def set_control_mode(
     cco_uid: CCOUID,
     control_mode: Annotated[
         ControlMode, Body(title="Transmitter external control mode")
@@ -156,12 +183,12 @@ def set_control_mode(
 
 
 @router.post("/{cco_uid}/reset_control_mode")
-def reset_control_mode(cco_uid: CCOUID):
+async def reset_control_mode(cco_uid: CCOUID):
     """
     Reset the control modes and force the transmitter to use 0-10V dimming.
     The transmitter will follow digital command if receiving digital signals even after this command.
     """
-    set_control_mode(
+    await set_control_mode(
         cco_uid,
         ControlMode(analog=True, button=True, modbus=True, bacnet=True, debug=True),
     )
@@ -170,7 +197,7 @@ def reset_control_mode(cco_uid: CCOUID):
 
 
 @router.put("/{cco_uid}/dim_single/{sta_uid}")
-def dim_single(
+async def dim_single(
     cco_uid: CCOUID,
     sta_uid: STAUID,
     dimming: Annotated[Dimming, Body(title="Three channel dimming level")],
@@ -194,7 +221,7 @@ def dim_single(
 
 
 @router.post("/{cco_uid}/disable_dim_single/{sta_uid}")
-def disable_dim_single(
+async def disable_dim_single(
     cco_uid: CCOUID,
     sta_uid: STAUID,
     dimming: Annotated[Dimming, Body(title="Three channel dimming level")] = Dimming(
@@ -218,7 +245,7 @@ def disable_dim_single(
 
 
 @router.get("/{cco_uid}/dim_broadcast")
-def get_dim_broadcast(cco_uid: CCOUID):
+async def get_dim_broadcast(cco_uid: CCOUID):
     """
     Get the transmitter broadcast dimming level
     """
@@ -232,7 +259,7 @@ def get_dim_broadcast(cco_uid: CCOUID):
 
 
 @router.put("/{cco_uid}/dim_broadcast")
-def dim_broadcast(
+async def dim_broadcast(
     cco_uid: CCOUID,
     dimming: Annotated[Dimming, Body(title="Three channel dimming level")],
 ):
@@ -250,7 +277,7 @@ def dim_broadcast(
 
 
 @router.get("/{cco_uid}/group/{sta_uid}")
-def get_sta_group(cco_uid: CCOUID, sta_uid: STAUID):
+async def get_sta_group(cco_uid: CCOUID, sta_uid: STAUID):
     """
     Get the group ID for a single adapter
     """
@@ -289,7 +316,7 @@ def get_sta_group(cco_uid: CCOUID, sta_uid: STAUID):
 
 
 @router.put("/{cco_uid}/group/{sta_uid}")
-def set_sta_group(
+async def set_sta_group(
     cco_uid: CCOUID,
     sta_uid: STAUID,
     group: Annotated[int, Query(title="Group ID", min=1, max=8)],
@@ -336,7 +363,7 @@ def set_sta_group(
 
 
 @router.get("/{cco_uid}/groups")
-def get_all_sta_groups(cco_uid: CCOUID):
+async def get_all_sta_groups(cco_uid: CCOUID):
     """
     Get the group ID for all STA
     """
@@ -377,7 +404,7 @@ def get_all_sta_groups(cco_uid: CCOUID):
 
 
 @router.put("/{cco_uid}/dim_group")
-def dim_group(
+async def dim_group(
     cco_uid: CCOUID,
     group: Annotated[int, Query(title="Group ID", min=1, max=8)],
     dimming: Annotated[Dimming, Body(title="Three channel dimming level")] = Dimming(
@@ -397,7 +424,7 @@ def dim_group(
 
 
 @router.post("/{cco_uid}/disable_group_dimming")
-def disable_group_dimming(
+async def disable_group_dimming(
     cco_uid: CCOUID, group: Annotated[int, Query(title="Group ID", min=1, max=8)]
 ):
     """
@@ -414,7 +441,7 @@ def disable_group_dimming(
 
 
 @router.post("/{cco_uid}/stop_network_waiting")
-def stop_network_waiting(
+async def stop_network_waiting(
     cco_uid: CCOUID,
 ):
     """
@@ -425,7 +452,7 @@ def stop_network_waiting(
 
 
 @router.get("/{cco_uid}/tx_power")
-def get_txpower(
+async def get_txpower(
     cco_uid: Annotated[
         str, Path(title="Transmitter serial number", min_length=8, max_length=8)
     ]
@@ -444,7 +471,7 @@ def get_txpower(
 
 
 @router.put("/{cco_uid}/tx_power")
-def set_txpower(
+async def set_txpower(
     cco_uid: CCOUID,
     txpower: Annotated[int, Query(title="Transmitting power", min=0, max=24)],
 ):
@@ -466,7 +493,7 @@ def set_txpower(
 
 
 @router.put("/{cco_uid}/access_time")
-def set_access_time(
+async def set_access_time(
     cco_uid: CCOUID,
     access_time: Annotated[
         int,
@@ -497,7 +524,7 @@ def set_access_time(
 
 
 @router.get("/{cco_uid}/access_time")
-def get_access_time(cco_uid: CCOUID):
+async def get_access_time(cco_uid: CCOUID):
     """
     Get the transmitter network discovery duration when autostarting
     """
@@ -512,7 +539,7 @@ def get_access_time(cco_uid: CCOUID):
 
 
 @router.put("/{cco_uid}/band")
-def set_frequency_band(
+async def set_frequency_band(
     cco_uid: CCOUID,
     band: Annotated[int, Query(title="Transmitter frequency band", min=0, max=3)],
 ):
@@ -536,7 +563,7 @@ def set_frequency_band(
 
 
 @router.get("/{cco_uid}/band")
-def get_frequency_band(cco_uid: CCOUID):
+async def get_frequency_band(cco_uid: CCOUID):
     """
     Get the PLC communication frequency band
     """
@@ -551,7 +578,7 @@ def get_frequency_band(cco_uid: CCOUID):
 
 
 @router.put("/{cco_uid}/dim_channel")
-def set_dimming_channel(
+async def set_dimming_channel(
     cco_uid: CCOUID,
     channel_count: Annotated[
         int, Query(title="Transmitter dimming channel count", min=1, max=2)
@@ -580,7 +607,7 @@ def set_dimming_channel(
 
 
 @router.get("/{cco_uid}/dim_channel")
-def get_dimming_channel(cco_uid: CCOUID):
+async def get_dimming_channel(cco_uid: CCOUID):
     """
     Get the transmitter number of analog dimming channel
     """
@@ -595,7 +622,7 @@ def get_dimming_channel(cco_uid: CCOUID):
 
 
 @router.get("/{cco_uid}/startup_control")
-def get_startup_control(cco_uid: CCOUID):
+async def get_startup_control(cco_uid: CCOUID):
     """
     Get the startup control setting for PLC adapters, ramp_up_duration is not used and meaningless
     """
@@ -619,7 +646,7 @@ def get_startup_control(cco_uid: CCOUID):
 
 
 @router.put("/{cco_uid}/startup_control")
-def set_startup_control(
+async def set_startup_control(
     cco_uid: CCOUID,
     startup_control: Annotated[
         StartupControl, Body(title="Adapter startup control setting")
@@ -649,7 +676,7 @@ def set_startup_control(
 
 
 @router.put("/{cco_uid}/modbus_rtu_node_address")
-def set_modbus_rtu_node_address(
+async def set_modbus_rtu_node_address(
     cco_uid: CCOUID,
     address: Annotated[int, Query(title="Modbus RTU node address", min=1, max=255)],
 ):
@@ -673,7 +700,7 @@ def set_modbus_rtu_node_address(
 
 
 @router.get("/{cco_uid}/modbus_rtu_node_address")
-def get_modbus_rtu_node_address(cco_uid: CCOUID):
+async def get_modbus_rtu_node_address(cco_uid: CCOUID):
     """
     Get the modbus node address setting
     """
@@ -688,7 +715,7 @@ def get_modbus_rtu_node_address(cco_uid: CCOUID):
 
 
 @router.put("/{cco_uid}/ip_address")
-def set_ip_address(
+async def set_ip_address(
     cco_uid: CCOUID,
     ip_config: Annotated[IpConfig, Body(title="IP Address Setting")] = IpConfig(
         dynamic=False,
@@ -760,7 +787,7 @@ def set_ip_address(
 
 
 @router.get("/{cco_uid}/ip_address")
-def get_ip_address(cco_uid: CCOUID):
+async def get_ip_address(cco_uid: CCOUID):
     """
     Get the transmitter IP address setting
     """
@@ -781,7 +808,7 @@ def get_ip_address(cco_uid: CCOUID):
 
 
 @router.delete("/{cco_uid}/whitelist")
-def clear_whitelist(cco_uid: CCOUID):
+async def clear_whitelist(cco_uid: CCOUID):
     """
     Remove the PLC communication STA whitelist
     """
@@ -796,7 +823,7 @@ def clear_whitelist(cco_uid: CCOUID):
 
 
 @router.get("/{cco_uid}/whitelist")
-def get_whitelist(cco_uid: CCOUID):
+async def get_whitelist(cco_uid: CCOUID):
     """
     Get the PLC communication STA whitelist
     """
@@ -828,14 +855,14 @@ def get_whitelist(cco_uid: CCOUID):
 
 
 @router.post("/{cco_uid}/whitelist")
-def set_whitelist(
+async def set_whitelist(
     cco_uid: CCOUID,
     sta_list: Annotated[list[STAUID], Body(title="List of STA UIDs")],
 ):
     """
     Set the PLC communication STA whitelist
     """
-    clear_whitelist(cco_uid)
+    await clear_whitelist(cco_uid)
     cmd = "WHSTART"
     send(cco_uid, cmd)
 
@@ -882,7 +909,7 @@ def set_whitelist(
 
 
 @router.post("/{cco_uid}/reboot")
-def reboot(cco_uid: CCOUID):
+async def reboot(cco_uid: CCOUID):
     """
     Force the transmitter to power cycle
     """
@@ -958,7 +985,7 @@ async def rebuild(cco_uid: CCOUID, websocket: WebSocket):
 
 
 @router.get("/{cco_uid}/status/{sta_uid}")
-def get_status(
+async def get_status(
     cco_uid: CCOUID,
     sta_uid: Annotated[
         str, Path(title="Adapter serial number", min_length=12, max_length=12)
