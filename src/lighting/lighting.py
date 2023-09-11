@@ -91,7 +91,7 @@ def receive() -> bytes:
     if any([res.startswith(b) for b in busy]):
         raise LightingException("Transmitter busy: " + res.decode("ascii"))
 
-    if res == b"":
+    if not res.endswith(b"\r\n"):
         logger.warning("LoRa readline() timeout")
         raise HTTPException(status_code=515, detail="LoRa response timeout")
     return res
